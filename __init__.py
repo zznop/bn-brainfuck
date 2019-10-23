@@ -111,6 +111,9 @@ class Brainfuck(Architecture):
         :param addr: Start address of data
         """
 
+        if isinstance(data, bytes):
+            data = data.decode()
+
         res = function.InstructionInfo()
         res.length = 1
         if data == ']':
@@ -129,6 +132,9 @@ class Brainfuck(Architecture):
         :param addr: Start address of data
         """
 
+        if isinstance(data, bytes):
+            data = data.decode()
+
         tokens = Brainfuck.Tokens.get(data, None)
         return (tokens, 1)
 
@@ -140,6 +146,9 @@ class Brainfuck(Architecture):
         :param addr: Start address of data
         :param il: LLIL object
         """
+
+        if isinstance(data, bytes):
+            data = data.decode()
 
         value = None
         data = data[0]
