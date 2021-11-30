@@ -136,8 +136,11 @@ class Brainfuck(Architecture):
                 InstructionTextToken(InstructionTextTokenType.InstructionToken, 'nop'),
             ]
         elif c == ']':
+            addr_true = self.get_addr_of_open_bracket(addr)
             tokens = [
                 InstructionTextToken(InstructionTextTokenType.InstructionToken, 'jnz'),
+                InstructionTextToken(InstructionTextTokenType.OperandSeparatorToken, ' '),
+                InstructionTextToken(InstructionTextTokenType.PossibleAddressToken, 'loc_%08X' % addr_true, addr_true),
             ]
         elif c == '.':
             tokens = [
