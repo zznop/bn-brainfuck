@@ -10,7 +10,7 @@ __version__    = '1.0'
 __email__      = 'zznop0x90@gmail.com'
 
 
-def cond_branch(il, cond, dest):
+def cond_branch(il, cond, addr_true, addr_false):
     """
     Creates a llil conditional branch expression
 
@@ -19,10 +19,10 @@ def cond_branch(il, cond, dest):
     :param dest: Branch destination
     """
 
-    t = il.get_label_for_address(Architecture['Brainfuck'], il[dest].constant)
+    t = il.get_label_for_address(Architecture['Brainfuck'], addr_true)
     if t is None:
         t = LowLevelILLabel()
-    f = il.get_label_for_address(Architecture['Brainfuck'], il.current_address+1)
+    f = il.get_label_for_address(Architecture['Brainfuck'], addr_false)
     if f is None:
         f = LowLevelILLabel()
     il.append(il.if_expr(cond, t, f))
@@ -44,8 +44,7 @@ class Brainfuck(Architecture):
     }
 
     stack_pointer = 'sp' # Not use, but required
-    node_starts   = []
-    node_ends     = []
+    bracket_mem = {}
 
     flags = ['z']
     flag_roles = { 'z' : FlagRole.ZeroFlagRole }
@@ -53,55 +52,21 @@ class Brainfuck(Architecture):
     flag_write_types = ['z']
     flags_written_by_flag_write_type = { 'z' : ['z'] }
 
-    Tokens =  {
-        '+' : [
-            InstructionTextToken(InstructionTextTokenType.InstructionToken, 'inc'),
-            InstructionTextToken(InstructionTextTokenType.OperandSeparatorToken, ' '),
-            InstructionTextToken(InstructionTextTokenType.TextToken, '['),
-            InstructionTextToken(InstructionTextTokenType.RegisterToken, 'cp'),
-            InstructionTextToken(InstructionTextTokenType.TextToken, ']'),
-        ],
-        '-' : [
-            InstructionTextToken(InstructionTextTokenType.InstructionToken, 'dec'),
-            InstructionTextToken(InstructionTextTokenType.OperandSeparatorToken, ' '),
-            InstructionTextToken(InstructionTextTokenType.TextToken, '['),
-            InstructionTextToken(InstructionTextTokenType.RegisterToken, 'cp'),
-            InstructionTextToken(InstructionTextTokenType.TextToken, ']'),
-        ],
-        '>' : [
-            InstructionTextToken(InstructionTextTokenType.InstructionToken, 'inc'),
-            InstructionTextToken(InstructionTextTokenType.OperandSeparatorToken, ' '),
-            InstructionTextToken(InstructionTextTokenType.RegisterToken, 'cp'),
-        ],
-        '<' : [
-            InstructionTextToken(InstructionTextTokenType.InstructionToken, 'dec'),
-            InstructionTextToken(InstructionTextTokenType.OperandSeparatorToken, ' '),
-            InstructionTextToken(InstructionTextTokenType.RegisterToken, 'cp'),
-        ],
-        '[' : [
-            InstructionTextToken(InstructionTextTokenType.InstructionToken, 'nop'),
-        ],
-        ']' : [
-            InstructionTextToken(InstructionTextTokenType.InstructionToken, 'jnz'),
-        ],
-        '.' : [
-            InstructionTextToken(InstructionTextTokenType.InstructionToken, 'stdout'),
-        ],
-        ',' : [
-            InstructionTextToken(InstructionTextTokenType.InstructionToken, 'stdin'),
-        ],
-    }
+    def get_addr_of_open_bracket(self, addr):
+        """
+        Compute address of matching '['
 
-    InstructionIL = {
-        '+' : lambda il, value: il.store(1, il.reg(1, 'cp'), il.add(1, il.load(1, il.reg(1, 'cp')), il.const(1, 1))),
-        '-' : lambda il, value: il.store(1, il.reg(1, 'cp'), il.sub(1, il.load(1, il.reg(1, 'cp')), il.const(1, 1))),
-        '>' : lambda il, value: il.set_reg(1, 'cp', il.add(1, il.reg(1, 'cp'), il.const(1, 1))),
-        '<' : lambda il, value: il.set_reg(1, 'cp', il.sub(1, il.reg(1, 'cp'), il.const(1, 1)), flags='z'),
-        '[' : lambda il, value: il.nop(),
-        ']' : lambda il, value: cond_branch(il, il.flag_condition(LowLevelILFlagCondition.LLFC_NE), il.const(4, value)),
-        '.' : lambda il, value: il.system_call(),
-        ',' : lambda il, value: il.system_call(),
-    }
+        :param addr: address of ']'
+        """
+        stack = []
+        for a in sorted(Brainfuck.bracket_mem):
+            if a == addr:
+                return stack.pop()
+
+            if Brainfuck.bracket_mem[a] == '[':
+                stack.append(a)
+            else:
+                stack.pop()
 
     def get_instruction_info(self, data, addr):
         """
@@ -116,12 +81,13 @@ class Brainfuck(Architecture):
 
         res = function.InstructionInfo()
         res.length = 1
-        if data == ']':
-            Brainfuck.node_ends.append(addr)
+        if data == '[':
+            Brainfuck.bracket_mem[addr] = '['
+        elif data == ']':
+            Brainfuck.bracket_mem[addr] = ']'
             res.add_branch(BranchType.FalseBranch, addr+1)
-            res.add_branch(BranchType.TrueBranch,  Brainfuck.node_starts[Brainfuck.node_ends.index(addr)])
-        elif data == '[':
-            Brainfuck.node_starts.append(addr)
+            res.add_branch(BranchType.TrueBranch, self.get_addr_of_open_bracket(addr))
+
         return res
 
     def get_instruction_text(self, data, addr):
@@ -135,7 +101,56 @@ class Brainfuck(Architecture):
         if isinstance(data, bytes):
             data = data.decode()
 
-        tokens = Brainfuck.Tokens.get(data, None)
+        tokens = []
+        c = data[0]
+        if c == '+':
+            tokens = [
+                InstructionTextToken(InstructionTextTokenType.InstructionToken, 'inc'),
+                InstructionTextToken(InstructionTextTokenType.OperandSeparatorToken, ' '),
+                InstructionTextToken(InstructionTextTokenType.TextToken, '['),
+                InstructionTextToken(InstructionTextTokenType.RegisterToken, 'cp'),
+                InstructionTextToken(InstructionTextTokenType.TextToken, ']'),
+            ]
+        elif c == '-':
+            tokens = [
+                InstructionTextToken(InstructionTextTokenType.InstructionToken, 'dec'),
+                InstructionTextToken(InstructionTextTokenType.OperandSeparatorToken, ' '),
+                InstructionTextToken(InstructionTextTokenType.TextToken, '['),
+                InstructionTextToken(InstructionTextTokenType.RegisterToken, 'cp'),
+                InstructionTextToken(InstructionTextTokenType.TextToken, ']'),
+            ]
+        elif c == '>':
+            tokens = [
+                InstructionTextToken(InstructionTextTokenType.InstructionToken, 'inc'),
+                InstructionTextToken(InstructionTextTokenType.OperandSeparatorToken, ' '),
+                InstructionTextToken(InstructionTextTokenType.RegisterToken, 'cp'),
+            ]
+        elif c == '<':
+            tokens = [
+                InstructionTextToken(InstructionTextTokenType.InstructionToken, 'dec'),
+                InstructionTextToken(InstructionTextTokenType.OperandSeparatorToken, ' '),
+                InstructionTextToken(InstructionTextTokenType.RegisterToken, 'cp'),
+            ]
+        elif c in ['[', '\n', ' ']:
+            tokens = [
+                InstructionTextToken(InstructionTextTokenType.InstructionToken, 'nop'),
+            ]
+        elif c == ']':
+            addr_true = self.get_addr_of_open_bracket(addr)
+            tokens = [
+                InstructionTextToken(InstructionTextTokenType.InstructionToken, 'jnz'),
+                InstructionTextToken(InstructionTextTokenType.OperandSeparatorToken, ' '),
+                InstructionTextToken(InstructionTextTokenType.PossibleAddressToken, 'loc_%08X' % addr_true, addr_true),
+            ]
+        elif c == '.':
+            tokens = [
+                InstructionTextToken(InstructionTextTokenType.InstructionToken, 'stdout'),
+            ]
+        elif c == ',':
+            tokens = [
+                InstructionTextToken(InstructionTextTokenType.InstructionToken, 'stdin'),
+            ]
+
         return (tokens, 1)
 
     def get_instruction_low_level_il(self, data, addr, il):
@@ -150,14 +165,27 @@ class Brainfuck(Architecture):
         if isinstance(data, bytes):
             data = data.decode()
 
-        value = None
+        expr_idx = None
         data = data[0]
-        if data == ']':
-            value = Brainfuck.node_starts[Brainfuck.node_ends.index(addr)]
+        if data == '+':
+            expr_idx = il.store(1, il.reg(1, 'cp'), il.add(1, il.load(1, il.reg(1, 'cp')), il.const(1, 1)))
+        elif data == '-':
+            expr_idx = il.store(1, il.reg(1, 'cp'), il.sub(1, il.load(1, il.reg(1, 'cp')), il.const(1, 1)))
+        elif data == '>':
+            expr_idx = il.set_reg(1, 'cp', il.add(1, il.reg(1, 'cp'), il.const(1, 1)))
+        elif data == '<':
+            expr_idx = il.set_reg(1, 'cp', il.sub(1, il.reg(1, 'cp'), il.const(1, 1)), flags='z')
+        elif data in ['[', ' ', '\n']:
+            expr_idx = il.nop()
+        elif data == ']':
+            addr_true = self.get_addr_of_open_bracket(addr)
+            addr_false = addr + 1
+            expr_idx = cond_branch(il, il.flag_condition(LowLevelILFlagCondition.LLFC_NE), addr_true, addr_false)
+        elif data in ['.', ',']:
+            expr_idx = il.system_call()
 
-        instr = Brainfuck.InstructionIL[data](il, value)
-        if instr is not None:
-            il.append(instr)
+        if expr_idx is not None:
+            il.append(expr_idx)
 
         return 1
 
@@ -189,8 +217,7 @@ class BrainfuckView(binaryview.BinaryView):
         except UnicodeError:
             return False
 
-        bf_re = re.compile('[+\-<>.,\[\]\n]+')
-        if bf_re.match(data):
+        if re.match(r'[+\-<>.,\[\]\n ]+', data):
             return True
 
         return False
