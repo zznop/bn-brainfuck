@@ -2,7 +2,7 @@
 
 ## Description
 
-Architecture module and loader for Brainfuck.
+Binary Ninja architecture module and binary view for Brainfuck.
 
 ..No, I didn't have anything better to do.
 
