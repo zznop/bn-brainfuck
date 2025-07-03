@@ -1,5 +1,5 @@
 """
-Binary Ninja plugin for Brainfuck programs
+Binary Ninja plugin that models Brainfuck programs
 """
 
 from binaryninja import *
@@ -52,41 +52,107 @@ class Brainfuck(Architecture):
     stack_pointer = 'sp'  # Not use, but required
     bracket_mem = {}
 
-    def get_addr_of_open_bracket(self, addr):
-        """
-        Compute address of matching '['
-
-        :param addr: address of ']'
-        """
-        stack = []
-        for a in sorted(Brainfuck.bracket_mem):
-            if a == addr:
-                return stack.pop()
-
-            if Brainfuck.bracket_mem[a] == '[':
-                stack.append(a)
-            else:
-                stack.pop()
-
     def get_instruction_info(self, data, addr):
         """
-        Provide information on branch operations
+        Unused. Basic block analysis is performed in analyze_basic_blocks.
         """
 
-        if isinstance(data, bytes):
-            data = data.decode()
+        info = function.InstructionInfo()
+        info.length = 1
+        return info
 
-        res = function.InstructionInfo()
-        res.length = 1
-        if data == '[':
-            Brainfuck.bracket_mem[addr] = '['
-        elif data == ']':
-            Brainfuck.bracket_mem[addr] = ']'
-            res.add_branch(BranchType.FalseBranch, addr + 1)
-            res.add_branch(BranchType.TrueBranch,
-                           self.get_addr_of_open_bracket(addr))
+    def _addr_is_executable(self, data, addr):
+        """
+        Check if the address is in the code section
+        """
 
-        return res
+        sections = data.get_sections_at(addr)
+        return sections and sections[
+            0].semantics == SectionSemantics.ReadOnlyCodeSectionSemantics
+
+    def analyze_basic_blocks(self, func, context):
+        """
+        Custom implementation of basic block analysis
+        """
+
+        data = func.view
+        blocks_to_process = [func.start]
+        seen_blocks = []
+        instr_blocks = {}
+        loop_starts = []
+
+        while len(blocks_to_process) > 0:
+            if data.analysis_is_aborted:
+                break
+
+            curr_addr = blocks_to_process.pop()
+            if not self._addr_is_executable(data, curr_addr):
+                continue
+
+            # Check if this block has already been proessed
+            if curr_addr in seen_blocks:
+                continue
+            seen_blocks.append(curr_addr)
+
+            # New block, process the instructions
+            block = context.create_basic_block(func.arch, curr_addr)
+            instr_blocks[curr_addr] = block
+            ends_block = False
+            while True:
+                instr = data.read(curr_addr,
+                                  1)  # Each BF instruction is 1 character
+
+                # Handle loop instructions
+                if instr == b'[':
+                    # Start of loop, end the current block
+                    loop_starts.append(curr_addr)
+                    block.end = curr_addr
+
+                    # Start a new block
+                    block.add_pending_outgoing_edge(
+                        BranchType.UnconditionalBranch, curr_addr, func.arch)
+                    context.add_basic_block(block)
+                    block = context.create_basic_block(func.arch, curr_addr)
+                elif instr == b']':
+                    # End of loop, find the nearest loop start in lower memory
+                    target = None
+                    loop_starts.sort(reverse=True)
+                    for i in range(len(loop_starts)):
+                        if loop_starts[i] < curr_addr:
+                            target = loop_starts[i]
+                            loop_starts.pop(i)
+                            break
+
+                    if target:
+                        block.add_pending_outgoing_edge(BranchType.TrueBranch,
+                                                        target, func.arch)
+                    else:
+                        log.log_warn(f'No matching [ for ] at {hex(curr_addr)}')
+
+                    block.add_pending_outgoing_edge(BranchType.FalseBranch,
+                                                    curr_addr + 1, func.arch)
+                    blocks_to_process.append(curr_addr + 1)
+                    ends_block = True
+
+                # Add the instruction to the block
+                block.add_instruction_data(instr)
+
+                # Check if it's the last instruction in the program
+                if curr_addr + 1 >= data.end:
+                    ends_block = True
+
+                curr_addr += 1
+                if not self._addr_is_executable(data, curr_addr):
+                    ends_block = True
+
+                if ends_block:
+                    break
+
+            if curr_addr != block.start:
+                block.end = curr_addr
+                context.add_basic_block(block)
+
+        context.finalize()
 
     def get_instruction_text(self, data, addr):
         """
@@ -149,15 +215,9 @@ class Brainfuck(Architecture):
                                      'nop'),
             ]
         elif c == ']':
-            addr_true = self.get_addr_of_open_bracket(addr)
             tokens = [
                 InstructionTextToken(InstructionTextTokenType.InstructionToken,
                                      'loopend'),
-                InstructionTextToken(
-                    InstructionTextTokenType.OperandSeparatorToken, ' '),
-                InstructionTextToken(
-                    InstructionTextTokenType.PossibleAddressToken,
-                    'loc_%08X' % addr_true, addr_true),
             ]
         elif c == '.':
             tokens = [
@@ -230,7 +290,16 @@ class Brainfuck(Architecture):
         elif op in ['[', ' ', '\n']:
             il.append(il.nop())
         elif op == ']':
-            addr_true = self.get_addr_of_open_bracket(addr)
+            edges = il.source_function.get_basic_block_at(addr).outgoing_edges
+            addr_true = None
+            for edge in edges:
+                if edge.type == BranchType.TrueBranch:
+                    addr_true = edge.target.start
+
+            if not addr_true:
+                log.log_warn(f'No true branch found for ] at {hex(addr)}')
+                return 1
+
             addr_false = addr + 1
             cond = il.compare_not_equal(1, il.load(1, il.reg(4, 'cp')),
                                         il.const(1, 0))
