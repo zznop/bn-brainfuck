@@ -1,3 +1,7 @@
+"""
+Binary Ninja plugin for Brainfuck programs
+"""
+
 from binaryninja import *
 import re
 import traceback
@@ -6,10 +10,6 @@ import traceback
 def cond_branch(il, cond, addr_true, addr_false):
     """
     Creates a llil conditional branch expression
-
-    :param il: LLIL object
-    :param cond: Flag condition
-    :param dest: Branch destination
     """
 
     t = il.get_label_for_address(Architecture['Brainfuck'], addr_true)
@@ -21,29 +21,36 @@ def cond_branch(il, cond, addr_true, addr_false):
     il.append(il.if_expr(cond, t, f))
 
 
+class DefaultCallingConvention(CallingConvention):
+    """
+    Defines the default calling convention for stdout/stdin operations
+    """
+
+    name = 'default'
+    int_arg_regs = ['cp']
+    callee_saved_regs = ['cp']
+    int_return_reg = 'ret'
+
+
 class Brainfuck(Architecture):
     """
     This class is responsible for disassembling and lifting Brainfuck code
     """
 
     name = 'Brainfuck'
-    address_size = 1
-    default_int_size = 1
+    address_size = 4
+    default_int_size = 4
     instr_alignment = 1
     max_instr_length = 1
     regs = {
-        'sp': function.RegisterInfo('sp', 1),  # Not used, but required
-        'cp': function.RegisterInfo('cp', 1),  # Cell pointer
+        'sp': function.RegisterInfo('sp', 4),  # Not used, but required
+        'cp': function.RegisterInfo('cp', 4),  # Cell pointer
+        'ret': function.RegisterInfo(
+            'ret', 4),  # Not used, but needed for the calling convention
     }
 
     stack_pointer = 'sp'  # Not use, but required
     bracket_mem = {}
-
-    flags = ['z']
-    flag_roles = {'z': FlagRole.ZeroFlagRole}
-    flags_required_for_flag_condition = {LowLevelILFlagCondition.LLFC_NE: ['z']}
-    flag_write_types = ['z']
-    flags_written_by_flag_write_type = {'z': ['z']}
 
     def get_addr_of_open_bracket(self, addr):
         """
@@ -131,7 +138,12 @@ class Brainfuck(Architecture):
                 InstructionTextToken(InstructionTextTokenType.RegisterToken,
                                      'cp'),
             ]
-        elif c in ['[', '\n', ' ']:
+        elif c == '[':
+            tokens = [
+                InstructionTextToken(InstructionTextTokenType.InstructionToken,
+                                     'loopstart'),
+            ]
+        elif c in ['\n', ' ']:
             tokens = [
                 InstructionTextToken(InstructionTextTokenType.InstructionToken,
                                      'nop'),
@@ -140,7 +152,7 @@ class Brainfuck(Architecture):
             addr_true = self.get_addr_of_open_bracket(addr)
             tokens = [
                 InstructionTextToken(InstructionTextTokenType.InstructionToken,
-                                     'jnz'),
+                                     'loopend'),
                 InstructionTextToken(
                     InstructionTextTokenType.OperandSeparatorToken, ' '),
                 InstructionTextToken(
@@ -160,6 +172,20 @@ class Brainfuck(Architecture):
 
         return (tokens, 1)
 
+    def repeated_op_count(self, data, op):
+        """
+        Count repeated operations that can be used to simplify IL
+        """
+
+        count = 0
+        for b in data:
+            if b == op:
+                count += 1
+            else:
+                break
+
+        return count
+
     def get_instruction_low_level_il(self, data, addr, il):
         """
         Lift instructions to LLIL
@@ -168,39 +194,55 @@ class Brainfuck(Architecture):
         if isinstance(data, bytes):
             data = data.decode()
 
-        expr_idx = None
-        data = data[0]
-        if data == '+':
-            expr_idx = il.store(
-                1, il.reg(1, 'cp'),
-                il.add(1, il.load(1, il.reg(1, 'cp')), il.const(1, 1)))
-        elif data == '-':
-            expr_idx = il.store(
-                1, il.reg(1, 'cp'),
-                il.sub(1, il.load(1, il.reg(1, 'cp')), il.const(1, 1)))
-        elif data == '>':
-            expr_idx = il.set_reg(1, 'cp',
-                                  il.add(1, il.reg(1, 'cp'), il.const(1, 1)))
-        elif data == '<':
-            expr_idx = il.set_reg(1,
-                                  'cp',
-                                  il.sub(1, il.reg(1, 'cp'), il.const(1, 1)),
-                                  flags='z')
-        elif data in ['[', ' ', '\n']:
-            expr_idx = il.nop()
-        elif data == ']':
+        if addr == 0x800000:
+            il.append(il.set_reg(4, 'cp', il.const(4, 0x1000000)))
+
+        op = data[0]
+        ilen = 1
+        if op == '+':
+            incval = self.repeated_op_count(data, '+')
+            ilen = incval
+            il.append(
+                il.store(
+                    1, il.reg(4, 'cp'),
+                    il.add(1, il.load(1, il.reg(4, 'cp')), il.const(1,
+                                                                    incval))))
+        elif op == '-':
+            decval = self.repeated_op_count(data, '-')
+            ilen = decval
+            il.append(
+                il.store(
+                    1, il.reg(4, 'cp'),
+                    il.sub(1, il.load(1, il.reg(4, 'cp')), il.const(1,
+                                                                    decval))))
+        elif op == '>':
+            incval = self.repeated_op_count(data, '>')
+            ilen = incval
+            il.append(
+                il.set_reg(4, 'cp',
+                           il.add(4, il.reg(4, 'cp'), il.const(1, incval))))
+        elif op == '<':
+            decval = self.repeated_op_count(data, '<')
+            ilen = decval
+            il.append(
+                il.set_reg(4, 'cp',
+                           il.sub(4, il.reg(4, 'cp'), il.const(1, decval))))
+        elif op in ['[', ' ', '\n']:
+            il.append(il.nop())
+        elif op == ']':
             addr_true = self.get_addr_of_open_bracket(addr)
             addr_false = addr + 1
-            expr_idx = cond_branch(
-                il, il.flag_condition(LowLevelILFlagCondition.LLFC_NE),
-                addr_true, addr_false)
-        elif data in ['.', ',']:
-            expr_idx = il.system_call()
+            cond = il.compare_not_equal(1, il.load(1, il.reg(4, 'cp')),
+                                        il.const(1, 0))
+            cond_branch(il, cond, addr_true, addr_false)
+        elif op == '.':
+            il.append(il.call(il.const(4, 0x2000000)))
+        elif op == ',':
+            il.append(il.call(il.const(4, 0x2000001)))
+        else:
+            il.append(il.undefined())
 
-        if expr_idx is not None:
-            il.append(expr_idx)
-
-        return 1
+        return ilen
 
 
 class BrainfuckView(binaryview.BinaryView):
@@ -241,19 +283,40 @@ class BrainfuckView(binaryview.BinaryView):
         """
 
         try:
-            # Create code segment
-            self.add_auto_segment(
-                0, len(self.raw), 0, len(self.raw),
-                SegmentFlag.SegmentReadable | SegmentFlag.SegmentExecutable)
-
             # Create code section
-            self.add_auto_section('.text', 0, len(self.raw),
+            self.add_auto_segment(
+                0x800000, len(self.raw), 0, len(self.raw),
+                SegmentFlag.SegmentReadable | SegmentFlag.SegmentExecutable)
+            self.add_auto_section('.code', 0x800000, len(self.raw),
                                   SectionSemantics.ReadOnlyCodeSectionSemantics)
 
-            # Setup the entry point
-            self.add_entry_point(0)
+            # Create cells section
+            self.add_auto_segment(
+                0x1000000, 30000, 0, 0,
+                SegmentFlag.SegmentReadable | SegmentFlag.SegmentWritable)
+            self.add_auto_section(
+                '.cells', 0x1000000, 30000,
+                SectionSemantics.ReadWriteDataSectionSemantics)
+            self.define_data_var(0x1000000, 'uint8_t cells[30000]', 'cells')
+
+            # Create extern section for stdout stdin "imports"
+            self.add_auto_segment(0x2000000, 2, 0, 0,
+                                  SegmentFlag.SegmentReadable)
+            self.add_auto_section('.extern', 0x2000000, 2,
+                                  SectionSemantics.ExternalSectionSemantics)
+
+            # Define the symbols for stdout and stdin
             self.define_auto_symbol(
-                Symbol(SymbolType.FunctionSymbol, 0, '_start'))
+                Symbol(SymbolType.SymbolicFunctionSymbol, 0x2000000, 'stdout'))
+            self.define_data_var(0x2000000, 'void stdout(char *c)')
+            self.define_auto_symbol(
+                Symbol(SymbolType.SymbolicFunctionSymbol, 0x2000001, 'stdin'))
+            self.define_data_var(0x2000001, 'void stdin(char *c)')
+
+            # Setup the entry point
+            self.define_auto_symbol(
+                Symbol(SymbolType.FunctionSymbol, 0x800000, '_start'))
+            self.add_entry_point(0x800000)
 
             return True
         except Exception:
@@ -271,4 +334,8 @@ class BrainfuckView(binaryview.BinaryView):
 
 
 Brainfuck.register()
+arch = Architecture['Brainfuck']
+arch.register_calling_convention(DefaultCallingConvention(arch, 'default'))
+arch.standalone_platform.default_calling_convention = arch.calling_conventions[
+    'default']
 BrainfuckView.register()
