@@ -7,7 +7,8 @@ import re
 import traceback
 
 
-def cond_branch(il, cond, addr_true, addr_false):
+def cond_branch(il: LowLevelILFunction, cond: ExpressionIndex, addr_true: int,
+                addr_false: int) -> None:
     """
     Creates a llil conditional branch expression
     """
@@ -52,7 +53,7 @@ class Brainfuck(Architecture):
     stack_pointer = 'sp'  # Not use, but required
     bracket_mem = {}
 
-    def get_instruction_info(self, data, addr):
+    def get_instruction_info(self, data: bytes, addr: int) -> InstructionInfo:
         """
         Unused. Basic block analysis is performed in analyze_basic_blocks.
         """
@@ -61,7 +62,7 @@ class Brainfuck(Architecture):
         info.length = 1
         return info
 
-    def _addr_is_executable(self, data, addr):
+    def _addr_is_executable(self, data: BinaryView, addr: int) -> bool:
         """
         Check if the address is in the code section
         """
@@ -70,7 +71,53 @@ class Brainfuck(Architecture):
         return sections and sections[
             0].semantics == SectionSemantics.ReadOnlyCodeSectionSemantics
 
-    def analyze_basic_blocks(self, func, context):
+    def lift_function(self, func: LowLevelILFunction,
+                      context: FunctionLifterContext) -> bool:
+        """
+        Override default function lifting and lift entire function at once
+        """
+
+        bv = func.view
+        for block in context.blocks:
+            context.prepare_block_translation(func, block.arch, block.start)
+            label = func.get_label_for_address(block.arch, block.start)
+            if label is not None:
+                func.mark_label(label)
+
+            addr = block.start
+            while addr < block.end:
+                if bv.analysis_is_aborted:
+                    break
+
+                func.set_current_address(addr, block.arch)
+                opcode = block.get_instruction_data(addr)
+                if not opcode:
+                    opcode = bv.read(addr, block.end - addr)
+
+                if not opcode:
+                    log.log_debug(f"Instruction data not found at {hex(addr)}")
+                    func.append(func.undefined())
+                    break
+
+                num_bytes = self.get_instruction_low_level_il(
+                    opcode, addr, func)
+                addr += num_bytes
+
+            curr_seg = bv.get_segment_at(block.end - 1)
+            if block.end == curr_seg.end:
+                func.append(func.no_ret())
+            else:
+                exit_label = func.get_label_for_address(block.arch, block.end)
+                if exit_label:
+                    func.append(func.goto(exit_label))
+                else:
+                    func.append(func.jump(block.end))
+
+        func.finalize()
+        return True
+
+    def analyze_basic_blocks(self, func: LowLevelILFunction,
+                             context: BasicBlockAnalysisContext) -> None:
         """
         Custom implementation of basic block analysis
         """
@@ -154,7 +201,7 @@ class Brainfuck(Architecture):
 
         context.finalize()
 
-    def get_instruction_text(self, data, addr):
+    def get_instruction_text(self, data: bytes, addr: int) -> tuple:
         """
         Get tokens used to display instruction disassembly
         """
@@ -232,7 +279,7 @@ class Brainfuck(Architecture):
 
         return (tokens, 1)
 
-    def repeated_op_count(self, data, op):
+    def repeated_op_count(self, data: str, op: str) -> int:
         """
         Count repeated operations that can be used to simplify IL
         """
@@ -246,7 +293,8 @@ class Brainfuck(Architecture):
 
         return count
 
-    def get_instruction_low_level_il(self, data, addr, il):
+    def get_instruction_low_level_il(self, data: bytes, addr: int,
+                                     il: LowLevelILFunction):
         """
         Lift instructions to LLIL
         """
@@ -330,7 +378,7 @@ class BrainfuckView(binaryview.BinaryView):
         self.raw = data.read(0, data.length)
 
     @classmethod
-    def is_valid_for_data(self, data):
+    def is_valid_for_data(self, data: BinaryView):
         """
         Determine if we're compatible. Ensure the file consists solely of BF
         code
@@ -392,13 +440,13 @@ class BrainfuckView(binaryview.BinaryView):
             log.log_error(traceback.format_exc())
             return False
 
-    def perform_is_executable(self):
+    def perform_is_executable(self) -> bool:
         return True
 
-    def perform_get_entry_point(self):
+    def perform_get_entry_point(self) -> int:
         return 0
 
-    def perform_get_address_size(self):
+    def perform_get_address_size(self) -> int:
         return Brainfuck.address_size
 
 
