@@ -73,10 +73,6 @@ class Brainfuck(Architecture):
 
     def lift_function(self, func: LowLevelILFunction,
                       context: FunctionLifterContext) -> bool:
-        """
-        Override default function lifting and lift entire function at once
-        """
-
         bv = func.view
         for block in context.blocks:
             context.prepare_block_translation(func, block.arch, block.start)
@@ -199,7 +195,21 @@ class Brainfuck(Architecture):
                 block.end = curr_addr
                 context.add_basic_block(block)
 
+        context.function_arch_context = "Hello from ABB"
         context.finalize()
+
+    def get_instruction_text_with_context(self, data: bytes, addr: int,
+                                          context: Any) -> tuple:
+        """
+        Get tokens used to display instruction disassembly with context
+        """
+
+        tokens, length = self.get_instruction_text(data, addr)
+        if context is not None:
+            tokens.append(
+                InstructionTextToken(InstructionTextTokenType.AnnotationToken,
+                                     f' ; {context}'))
+        return (tokens, length)
 
     def get_instruction_text(self, data: bytes, addr: int) -> tuple:
         """
